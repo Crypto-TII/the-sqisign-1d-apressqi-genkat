@@ -1,3 +1,20 @@
+# Optimized SQIsign one-dimensional verification on Intel and Cortex-M4
+
+This first part of the README concerns only the work [`Optimized SQIsign 1D`](https://eprint.iacr.org/2024/.....) that uses the ApresSQI repo with some modifications to generate KATs for SQIsign 1D.
+
+To generate KATs for SQIsign 1D with the primes NIST, p4, p7 or p248, go to directory `ApresSQI-Sage` and run for example:
+
+```bash
+sage SQIsign_KAT_generator.py p248 False False
+```
+to obtain KATs for the uncompressed version with the prime p248.
+
+Note: the KAT generation does not include the seeded option since this is not considered in this specific work
+
+Once KATs for the uncompressed or smart version for p248 are generated, these can be converted to all the other versions using the corresponding code files in `ApresSQI-Sage`.
+
+The original ApresSQI repo can be found at [`ApresSQI`](https://github.com/TheSICQ/ApresSQI/blob/main/ApresSQI-Sage/klpt.py) and hereafter goes its original README 
+
 # AprèsSQI
 
 This repository contains the code related to the SQIsign signature scheme, using extension-fields in signing. This is code accompanying the paper *[AprèsSQI: Extra Fast Verification for SQIsign Using Extension-Field Signing](https://eprint.iacr.org/2023/1559)* by Maria Corte-Real Santos, Jonathan Komada Eriksen, Michael Meyer and Krijn Reijnders.

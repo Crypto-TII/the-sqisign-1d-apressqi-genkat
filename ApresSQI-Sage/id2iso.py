@@ -9,7 +9,7 @@ from sage.schemes.elliptic_curves.hom_composite import EllipticCurveHom_composit
 from quaternion import IdealGenerator, QuaternionOrderBasis, InverseIdeal, pullback
 from xonly import customTwoIsogeny, xDBLMUL
 from klpt import SpecialEichlerNorm, FindLinearCombination
-from ec import CompleteBasis, TorsionBasis
+from ec import CompleteBasis, TorsionBasis, TorsionBasis_2tof, sqrtNonConstTime
 from utilities import BiDLP
 from xonly_velusqrt import EllipticCurveHom_velusqrt
 
@@ -30,7 +30,7 @@ def chain_iso(kernelPointsIn, E):
     while kernelPoints:
         Ri, (l,e), coeffs = kernelPoints.pop()
         Ki = Ri.xMUL(l**(e-1))
-        print(f'Computing isogeny of degree {l} over Fp^{Ki.X.parent().degree()}')
+        # print(f'Computing isogeny of degree {l} over Fp^{Ki.X.parent().degree()}')
         if l > 100 and Ki.X.parent().degree() == 2:
             print("> Using sqrt_velu")
             phi = EllipticCurveHom_velusqrt(Ei, Ki, l)
@@ -146,7 +146,6 @@ def PushBasis(phi, FacToBasis):
     for key in FacToBasis.keys():
         if key%2 == 0: #Only want to push the prime power T-torsion
             continue
-        PushedBasis = [R for R in FacToBasis[key]]
         PushedBasis = [R.push(phi) for R in FacToBasis[key]]
         PushedFacToBasis[key] = PushedBasis
 
@@ -235,6 +234,70 @@ def IdealToIsogenyEichler(O0, O0_alt, I, J, pushedFacToBasis, facToAction, Q, f,
         zip[1].append(s_i)
     return phi_I, zip, Q_2f
 
+def IdealToIsogenyEichler_new(O0, O0_alt, I, J, pushedFacToBasis, facToAction, Q, f, T, I_secret = None):
+    r"""
+    Main idea:
+    Given a left O-ideal I of norm 2^*, and a
+    connecting an (O_0, O)-ideal J,
+    returns phi_I
+
+    Some additional parameters are required/returned,
+    useful for signing
+    """
+    assert radical(I.norm()) == 2
+    assert J.left_order() == O0
+    assert I.left_order() == J.right_order()
+    _, e = factor(I.norm())[0]
+    g = ceil(e/(f-1))
+    Ji = J
+    O = I.left_order()
+    Ii = I + O*(2**(f-1))
+    phi_I = False
+    Iim = InverseIdeal(Ii)*I
+    Oi = O
+    Q_2f = Q
+    Ki = Ji.conjugate() + Oi*(2**(f-1))
+    LRs = []
+    CDs = []
+    betas = []
+    print("Initiating Ideal Steps")
+    for step in range(g):
+        print(f'>step: {step}')
+        assert Ii.norm() == 2**(f-1)
+        if step == 0 and I_secret:
+            LRi, CDi, beta = IdealStep(T, O0, O0_alt, Ii, Ji, Ki, I_secret=I_secret)
+        else:
+            LRi, CDi, beta = IdealStep(T, O0, O0_alt, Ii, Ji, Ki)
+        LRs.append(LRi)
+        CDs.append(CDi)
+        betas.append(beta)
+        Ji = Ji*Ii
+        Ki = Ii.conjugate()
+        Oi = Ii.right_order()
+        Ii = Iim + Oi*2**min(f-1, (g-(step+1))*(f-1))
+        Iim = InverseIdeal(Ii)*Iim
+    print("Initiating Isogeny Steps")
+    E = Q_2f.curve()
+    A = E.a2()
+    delta = A**2 - 4
+    sdelta = sqrtNonConstTime(delta)
+    alpha = (-A-sdelta)/2
+    phi_Ii, Q_2f, alpha, s_1, b = IsogenyStep_new(O0, LRs[0], CDs[0], betas[0], Q_2f, alpha, pushedFacToBasis, facToAction, f)
+    if phi_I:
+        phi_I = phi_Ii * phi_I
+    else:
+        phi_I = phi_Ii
+    zip = [b, [s_1]]
+    last = False
+    for step in range(1, g):
+        print(f'>Step: {step}')
+        pushedFacToBasis = PushBasis(phi_Ii, pushedFacToBasis)
+        if step == g-1:
+            last = True
+        phi_Ii, Q_2f, alpha, s_i, _ = IsogenyStep_new(O0, LRs[step], CDs[step], betas[step], Q_2f, alpha, pushedFacToBasis, facToAction, f, last=last)
+        zip[1].append(s_i)
+    return phi_Ii, zip, Q_2f, alpha
+
 def IdealStep(T, O0, O0_alt, I, J, K, I_secret=None):
     r"""
     Subroutine of IdealToIsogenyEichler
@@ -284,6 +347,41 @@ def IsogenyStep(O0, LR, CD, beta, Q_2f, pushedFacToBasis, facToAction, f, first=
     pushedQ_2f = phi(Q_2f)
     return phi, pushedQ_2f, s, b
 
+def IsogenyStep_new(O0, LR, CD, beta, Q_2f, alpha, pushedFacToBasis, facToAction, f, last=False):
+    r"""
+    Subroutine of IdealToIsogenyEichler
+    """
+    C, D = CD
+    E = Q_2f.curve()
+    P_2f = CompleteBasis(Q_2f, 2**f)
+    x_1, x_2 = EndomorphismAction_new(O0, LR, 2*P_2f, 2*Q_2f, beta, pushedFacToBasis, facToAction, f)
+    # C*Q_2f + D*(beta(Q_2f)) = C*Q_2f + D*(x_1 * Q_2f + x_2 * P_2f)
+    a_1 = D*x_2
+    a_2 = C + D*x_1
+    G = a_1*2*P_2f + a_2*2*Q_2f
+    P_2f, Q_2f = TorsionBasis_2tof(E, alpha, f, xOnly=1)
+    a_1, a_2 = BiDLP(G, 2*P_2f, 2*Q_2f, 2**(f-1))
+    if a_1 % 2 == 0:
+        _temp = P_2f
+        P_2f = Q_2f
+        Q_2f = _temp
+        s = (pow(a_2, -1, 2**(f-1))*a_1) % 2**(f-1)
+        b = 0
+    else:
+        s = (pow(a_1, -1, 2**(f-1))*a_2) % 2**(f-1)
+        b = 1
+    G_2f = P_2f + s*Q_2f
+    G_2fm1 = 2*G_2f
+
+    phi = customTwoIsogeny(G_2fm1, f-1)
+    if not last:
+        Q_2f = phi(Q_2f)
+
+    P_alpha = phi(G_2f)
+    alpha = P_alpha[0]
+
+    return phi, Q_2f, alpha, s, b
+
 def EndomorphismAction(O0, LR, P_2f, Q_2f, beta, pushedFacToBasis, facToAction, f):
     r"""
     Finds the action of beta on a fixed 2^f-torsion basis P_2f, Q_2f.
@@ -310,4 +408,32 @@ def EndomorphismAction(O0, LR, P_2f, Q_2f, beta, pushedFacToBasis, facToAction, 
         x_1 = -x_1 % twof
         x_2 = -x_2 % twof
     
+    return x_1, x_2
+
+def EndomorphismAction_new(O0, LR, P_2f, Q_2f, beta, pushedFacToBasis, facToAction, f):
+    r"""
+    Finds the action of beta on a fixed 2^f-torsion basis P_2f, Q_2f.
+    """
+    L, R = LR
+    twof = 2**(f-1)
+    phi_1 = IdealToIsogeny(O0, L, Q_2f.curve(), pushedFacToBasis, facToAction)
+    phi_2 = IdealToIsogeny(O0, R, Q_2f.curve(), pushedFacToBasis, facToAction)
+    omega = phi_1.codomain().isomorphism_to(phi_2.codomain())
+    phi_1 = omega * phi_1
+    phi_1Q = phi_1(Q_2f)
+    phi_1P = phi_1(P_2f)
+    phi_2Q = phi_2(Q_2f)
+    phi_2P = phi_2(P_2f)
+    x_1, x_2 = BiDLP(phi_1Q, phi_2Q, phi_2P, 2**(f-1))
+    x_1 = (phi_2.degree()*x_1) % twof
+    x_2 = (phi_2.degree()*x_2) % twof
+
+    # ChineseSQIsign improvement:
+    x_4 = (beta.reduced_trace() - x_1) % twof
+    x_3 = ((x_1*x_4 - beta.reduced_norm()) * pow(x_2, -1, twof)) % twof
+    testPoint = x_3*phi_2Q + x_4*phi_2P
+    if testPoint != phi_2.degree()*phi_1P:
+        x_1 = -x_1 % twof
+        x_2 = -x_2 % twof
+
     return x_1, x_2

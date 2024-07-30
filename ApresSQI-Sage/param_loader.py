@@ -21,6 +21,8 @@ def load(p):
         p = 0x323fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
     if p == '7-block':
         p = 0x309c04bcaedbb0134cca8373e439ffffffffffffffffffffffffffffffffffff
+    if p == 'p248':
+        p = 0x4ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
     params = {}
     filename = 'Precomputed/' + str(p) + '.py'
     print(filename)

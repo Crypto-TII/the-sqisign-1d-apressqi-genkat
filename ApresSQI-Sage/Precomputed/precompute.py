@@ -1,6 +1,8 @@
+import sys
+sys.path.append("../ApresSQI-Sage")
 from sage.all import *
 from utilities import BiDLP
-from ec import TorsionBasis
+from ec import TorsionBasis, TorsionBasis_2tof
 from xonly import xPoint
 
 #######################################################
@@ -223,7 +225,9 @@ def ActionMatrix(alpha, basis, ord):
 #p = Integer(22728720641309136015759539049556903787604752849407962277276342173428260798463)
 #p = Integer(507227047723007)
 #p = Integer(136319)
-p = Integer(8513034219037441780170691209753296498696014329521974009944792576819199999999) #From Cryptographic Smooth Neighbours
+#p = Integer(8513034219037441780170691209753296498696014329521974009944792576819199999999) #From Cryptographic Smooth Neighbours
+# 2D-West prime
+p = Integer(2261564242916331941866620800950935700259179388000792266395655937654553313279)
 
 F = GF((p,2), name='z2', modulus=var('x')**2 + 1)
 sqrtm1 = F.gens()[0]
@@ -247,6 +251,16 @@ except:
         for (l,e) in factor(T):
             for ee in range(1, e+1):
                 facToExt[l**ee] = 1
+    elif p == 2261564242916331941866620800950935700259179388000792266395655937654553313279:
+        T = Integer(2022583344503603479631240003654850560243999593504110556905941688649221229706809491130485299281855815)
+        facToExt = {}
+        for (l,e) in factor(T):
+            le = l**e
+            for ee in range(1, e+1):
+                k = Mod(p, le).multiplicative_order()
+                if k%2 == 0 and pow(p, k//2, le) - le == -1: # Use twist in this case (cant just divide k by 2, since (ZZ/2^eZZ)^* is not cyclic...)
+                    k //= 2
+                facToExt[l**ee] = k
     else:
         T, facToExt = choose_torsion(p, 1, (p**(1.25))*2000)
 

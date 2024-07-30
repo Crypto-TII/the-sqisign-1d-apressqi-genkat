@@ -594,6 +594,54 @@ def sqrtDeterministic(a):
         return F([t0*c0, t3*c0]) 
     return F([t0, t3])
 
+def sqrtNonConstTime(a):
+    #Comment from SQIsign NIST (fp2_sqrt): // NOTE: old, non-constant-time implementation. Could be optimized
+    # re = a[0]
+    # im = a[1]
+    # F = a.parent()
+    # p = F.characteristic()
+    # exp  = (p+1) // 4
+    # if im == 0:
+    #     if re.is_square():
+    #         re = re**exp
+    #         return F([re, 0])
+    #     else:
+    #         im = (-re)**exp
+    #         return F([0,im])
+    # sdelta = (a[0]**2 + a[1]**2)**exp
+    # re = a[0] + sdelta
+    # re = re / 2
+    # if not re.is_square():
+    #     re = a[0] - sdelta
+    #     re = re / 2
+    # re = re**exp
+    # im = a[1] / (2 * re)
+    # return F([re,im])
+    re = a[0]
+    im = a[1]
+    F = a.parent()
+    p = F.characteristic()
+    exp1mod4  = (p+1) // 4
+    exp3mod4  = (p-3) // 4
+    if im == 0:
+        if re.is_square():
+            re = re**exp1mod4
+            return F([re, 0])
+        else:
+            im = (-re)**exp1mod4
+            return F([0,im])
+    sdelta = (re**2 + im**2)**exp1mod4
+    re = a[0] + sdelta
+    t0 = 2*re
+    im = t0**exp3mod4
+    re = re*im
+    im = a[1]*im
+    t1 = (2*re)**2
+    if t1 == t0:
+        return F([re,im])
+    else:
+        return F([im,-re])
+
 def MontgomeryNormalize(A):
     r"""
     Given a Montgomery coefficient A,
@@ -603,13 +651,13 @@ def MontgomeryNormalize(A):
     """
     F = A.parent()
     Z_0 = A**2
-    temp = (A**3 - 3*A)/(2*sqrtDeterministic(A**2 - 4))
-    Z_1 = (9 - A**2)/2 + temp 
+    temp = (A**3 - 3*A)/(2*sqrtNonConstTime(A**2 - 4))
+    Z_1 = (9 - A**2)/2 + temp
     Z_2 = (9 - A**2)/2 - temp
     Zlist = [Z_0, Z_1, Z_2]
     Zlist.sort(key = lexiographic_ordering)
     Z = Zlist[0]
-    Anew = sqrtDeterministic(Z)
+    Anew = sqrtNonConstTime(Z)
     E = EllipticCurve(F, [0,Anew,0,1,0])
     return E
 

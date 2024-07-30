@@ -4,7 +4,8 @@
 ####################################################################################################################
 
 from sage.all import *
-from xonly import isMontgomery, xPoint, sqrtDeterministic
+from xonly import isMontgomery, xPoint, sqrtDeterministic, sqrtNonConstTime
+import hashlib
 
 #############################
 #                           #
@@ -59,7 +60,7 @@ def TorsionBasis(E, D, xOnly = 0, seeds = None, small_ns = None, small_s = None)
         # Multiply by cofactor after, because of verification shenanigans
         P = E.lift_x(p)
         Q = E.lift_x(q)
-        PmQ = point_difference(P, Q)
+        PmQ = point_difference_new(P, Q)
         if PmQ != (P - Q).xy()[0]:
             Q = -Q
             assert PmQ == (P - Q).xy()[0]
@@ -105,7 +106,7 @@ def TorsionBasis(E, D, xOnly = 0, seeds = None, small_ns = None, small_s = None)
             if basis:
                 Qexp.set_order(D)
                 break
-        PmQ = point_difference(P, Q)
+        PmQ = point_difference_new(P, Q)
         if PmQ != (P - Q).xy()[0]:
             Qexp = -Qexp
         return Pexp, Qexp, (n, m)
@@ -135,6 +136,51 @@ def TorsionBasis(E, D, xOnly = 0, seeds = None, small_ns = None, small_s = None)
         return P, Q, xP, xQ, xPmQ
     return xP, xQ, xPmQ
 
+def TorsionBasis_2tof(E, alpha, f, xOnly = 0):
+    F = alpha.parent()
+    i = F.gens()[0]
+    p = F.characteristic()
+    cof = (p+1)/2**f
+
+    x = F(1)
+    while True:
+        x += i
+        if x.is_square():
+            continue
+        try:
+            P = E.lift_x(x)
+            break
+        except:
+            continue
+    P = cof * P
+
+    z = F(2)
+    while True:
+        z += i
+        # print(f'z = {z} -- is not square z: {not z.is_square()} -- is square z-1: {(z-1).is_square()}')
+        if not z.is_square() or (z-1).is_square():
+            continue
+        try:
+            Q = E.lift_x(z*alpha)
+            break
+        except:
+            continue
+    Q = cof * Q
+
+    PmQ = point_difference_new(P, Q)
+    if PmQ != (P - Q).xy()[0]:
+        Q = -Q
+        assert PmQ == (P - Q).xy()[0]
+    P.set_order(2**f)
+    Q.set_order(2**f)
+
+    if xOnly == 1:
+        return P, Q
+    PmQ = P-Q
+    xP, xQ, xPmQ = xPoint(P.xy()[0], E), xPoint(Q.xy()[0], E), xPoint(PmQ.xy()[0], E)
+    if xOnly == 2:
+        return P, Q, xP, xQ, xPmQ
+    return xP, xQ, xPmQ
 
 def point_difference(P, Q, x_only = False):
 	#follows code from SQIsign NIST version 1.0
@@ -172,25 +218,108 @@ def point_difference(P, Q, x_only = False):
     PmQX = t0 + t1
     return PmQX/PmQZ
 
+def point_difference_new(P, Q, x_only=False):
+    #check if all inputs are affine
+    if x_only:
+        E = P.curve
+        assert isMontgomery(E)
+        A = E.a2()
+        Px, Qx = P.X, Q.X
+    else:
+        E = P.curve()
+        assert isMontgomery(E)
+        A = E.a2()
+        Px, Qx = P.xy()[0], Q.xy()[0]
+
+    t0 = Px * Qx
+    t1 = 1 * 1
+    Bxx = t0 - t1
+    Bxx = Bxx**2
+    Bxz = t0 + t1
+    t0 = Px * 1
+    t1 = 1 * Qx
+    Bzz = t0 + t1
+    Bxz = Bxz * Bzz
+    Bzz = t0 - t1
+    Bzz = Bzz**2
+    t0 = t0 * t1
+    t0 = t0 * A
+    t0 = t0 + t0
+    Bxz = Bxz + t0
+
+    t0 = Bxz**2
+    t1 = Bxx * Bzz
+    t0 = t0 - t1
+    t0 = sqrtNonConstTime(t0)
+    PmQx = Bxz + t0
+    PmQz = Bzz
+    return PmQx/PmQz
+
 #############################
 #                           #
 #     Hashing to chall      #
 #                           #
 #############################
 
-from hashlib import sha256
-
+FP2_ENCODED_BYTES = 64
 def hashToPoint(D, msg, E, seeds=None, small_ns=None, small_s=None):
-    H = sha256()
-    H.update(bytes(msg, "utf-8"))
+    J = E.j_invariant()
+    E_bytes = f'{int(J[0]):0{FP2_ENCODED_BYTES}x}'
+    E_bytes = f'{int(J[1]):0{FP2_ENCODED_BYTES}x}' + E_bytes
+    E_bytes = bytearray.fromhex(E_bytes)[::-1]
+
+    E_msg_bytes = E_bytes + bytearray.fromhex(msg)
+
+    H = hashlib.shake_256()
+    H.update(E_msg_bytes)
+    s = int.from_bytes(H.digest(32), 'little')
+
     if small_ns and small_s:
         P, Q, seeds = TorsionBasis(E, D, small_ns=small_ns, small_s=small_s)
-        s = int.from_bytes(H.digest())%D
         return P + s*Q, seeds
     else:
         if seeds:
             P, Q = TorsionBasis(E, D, seeds=seeds, small_ns=small_ns, small_s=small_s)
         else:
             P, Q = TorsionBasis(E, D, xOnly = 1)
-        s = int.from_bytes(H.digest())%D
         return P + s*Q
+
+RADIX = 64
+NWORDS_FIELD = 4
+def hashToPointNewFast(E, msg):
+    i = E.base_field().gens()[0]
+    p = E.base_field().characteristic()
+    cof = (p+1)//(2**128)
+
+    J = E.j_invariant()
+    E_bytes = f'{int(J[0]):0{FP2_ENCODED_BYTES}x}'
+    E_bytes = f'{int(J[1]):0{FP2_ENCODED_BYTES}x}' + E_bytes
+    # print('E_bytes =', E_bytes)
+
+    E_bytes = bytearray.fromhex(E_bytes)[::-1]
+
+    E_msg_bytes = E_bytes + bytearray.fromhex(msg)
+
+    z = 1
+    while True:
+        z += i
+        if not z.is_square():
+            break
+    for inc in range(256):
+        inc_bytes = f'{inc:0{2}x}'
+        input_bytes = E_msg_bytes + bytearray.fromhex(inc_bytes)[::-1]
+
+        H = hashlib.shake_256()
+        H.update(input_bytes)
+        s = int.from_bytes(H.digest(NWORDS_FIELD*RADIX//8), 'little')
+
+        x = z*s #This step fails when not using p4
+
+        try:
+            K = E.lift_x(x)
+        except Exception as e:
+            continue
+        K = cof * K
+        return K
+    # Failed to hash after 2**8 attempts
+    assert False

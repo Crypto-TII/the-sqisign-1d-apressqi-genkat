@@ -9,9 +9,9 @@ from klpt import *
 from id2iso import *
 from param_loader import load, AlternativeOrder
 from quaternion import pushforward, MakeCyclic
-from ec import hashToPoint, CompleteBasis, TorsionBasis
+from ec import hashToPointNewFast, CompleteBasis, TorsionBasis, point_difference_new, TorsionBasis_2tof
 from ast import literal_eval
-from xonly import Normalized, xPoint
+from xonly import Normalized, xPoint, xDBLMUL
 
 class SQIsign:
     """
@@ -46,7 +46,7 @@ class SQIsign:
         self.sk = None
         self.pk = None
 
-    def KeyGen(self):
+    def KeyGen(self, param = 'toy'):
         print("Generating secret key ....")
         p_bitsize = ceil(log(self.p,2))
         I_secret_bitsize = ceil(p_bitsize/4) 
@@ -72,6 +72,10 @@ class SQIsign:
         pushedFacToBasis = PushBasis(phi_secret, self.facToBasis)
         self.pk = SQIsign_pubkey(E_A)
         self.sk = SQIsign_privkey(alpha.conjugate(), pushedFacToBasis, Q_2f, self.pk)
+
+        fname = f'SQI_{param}_priv.key'
+        self.sk.export(fname)
+
         return self.pk
 
     def Sign(self, msg, seeded = True, compressed = True):
@@ -87,27 +91,21 @@ class SQIsign:
 
         #<<<<---- Commitment --->>>>>
         gamma = FullRepresentInteger(self.O0, self.D_com * 2**ceil(log(self.p, 2)))
-        #a, b = [randint(1, self.D_com) for _ in range(2)]
-        #I_com = self.O0*(a + b*theta) + self.O0*self.D_com
         I_com = self.O0*gamma + self.O0*self.D_com
         phi_com = IdealToIsogeny(self.O0, I_com, self.E0, self.facToBasis, self.facToAction)
         E_1, phi_com = Normalized(phi_com)
         P_1, Q_1 = [phi_com(P) for P in self.B_chall]
 
         #<<<<---- Challenge --->>>>>
-        if seeded or not compressed:
-            K_chall, seeds_hash = hashToPoint(self.D_chall, msg, E_1, small_ns = self.small_ns, small_s = self.small_s)
-        else:
-            K_chall = hashToPoint(self.D_chall, msg, E_1)
+        K_chall = hashToPointNewFast(E_1, msg)
         phi_chall = E_1.isogeny(K_chall, algorithm='factored')
-        E_2, phi_chall = Normalized(phi_chall)
         a, b = BiDLP(K_chall, P_1, Q_1, self.D_chall)
         I_chall = pushforward(I_com, KernelDecomposedToIdeal(self.O0, self.D_chall, a, b, self.facToAction))
 
         #<<<<---- Response --->>>>>
         K = I_secret.conjugate()*I_com*I_chall
         for _ in range(100):
-            J = SigningKLPT(self.O0, K, I_secret, self.f)
+            J = SigningKLPT(self.O0, K, I_secret, self.f-1)
             if not J:
                 continue
             # test that composition with challenge is cyclic
@@ -124,7 +122,8 @@ class SQIsign:
                 continue
             break
         assert J, "SigningKLPT failed"
-        phi_sig, zip, _ = IdealToIsogenyEichler(self.O0, self.O0_alt, J, J_secret, pushedFacToBasis, self.facToAction, Q_2f, self.f, self.T, I_secret=I_secret)
+        # phi_sig, zip, _ = IdealToIsogenyEichler(self.O0, self.O0_alt, J, J_secret, pushedFacToBasis, self.facToAction, Q_2f, self.f, self.T, I_secret=I_secret)
+        phi_sig, zip, _, alpha = IdealToIsogenyEichler_new(self.O0, self.O0_alt, J, J_secret, pushedFacToBasis, self.facToAction, Q_2f, self.f, self.T, I_secret=I_secret)
         E_2 = phi_sig.codomain()
 
         #<<<<---- Recompute the hash --->>>>>
@@ -137,32 +136,37 @@ class SQIsign:
             seeds_last_step.append(seeds_chall)
             seeds_last_step.append(seeds_hash)
         else:
-            P_2, Q_2 = TorsionBasis(E_2, self.D_chall, xOnly=1)
+            P_2, Q_2 = TorsionBasis_2tof(E_2, alpha, self.f, xOnly=1)
+        P_2 = (2**self.f // self.D_chall)*P_2
+        Q_2 = (2**self.f // self.D_chall)*Q_2
         f2 = self.D_chall.valuation(2)
         f3 = self.D_chall.valuation(3)
         a_0, a_1 = BiDLP(Pm*3**f3, P_2*3**f3, Q_2*3**f3, 2**f2)
-        b_1 = 0
-        if a_0 % 2 == 0:
-            temp = a_0
-            a_0 = a_1
-            a_1 = temp
-            b_1 = 1
-        s_1 = (pow(a_0, -1, 2**f2) * a_1) % 2**f2
         if f3 != 0:
-            a_0, a_1 = BiDLP(Pm*2**f2, P_2*2**f2, Q_2*2**f2, 3**f3)
-            b_2 = 0
-            if a_0 % 3 == 0:
+            b_1 = 1
+            if a_0 % 2 == 0:
                 temp = a_0
                 a_0 = a_1
                 a_1 = temp
+                b_1 = 0
+            s_1 = (pow(a_0, -1, 2**f2) * a_1) % 2**f2
+            if f3 != 0:
+                a_0, a_1 = BiDLP(Pm*2**f2, P_2*2**f2, Q_2*2**f2, 3**f3)
                 b_2 = 1
-            s_2 = (pow(a_0, -1, 3**f3) * a_1) % 3**f3
-            s = (b_1, s_1, b_2, s_2)
+                if a_0 % 3 == 0:
+                    temp = a_0
+                    a_0 = a_1
+                    a_1 = temp
+                    b_2 = 0
+                s_2 = (pow(a_0, -1, 3**f3) * a_1) % 3**f3
+                s = (b_1, s_1, b_2, s_2)
+            else:
+                s = (b_1, s_1)
+            Qm = self._derive_Q(s, P_2, Q_2)
         else:
-            s = (b_1, s_1)
-
+            s = (pow(a_0, -1, 2**f2) * a_1) % 2**f2
+            Qm = Q_2
         E_1m, phi_chall_hat = Normalized(E_2.isogeny(Pm, algorithm='factored'))
-        Qm = self._derive_Q(s, P_2, Q_2)
         Q = phi_chall_hat(Qm)
         r = Q.discrete_log(K_chall)
         assert r*Q == K_chall
@@ -173,8 +177,9 @@ class SQIsign:
             else:
                 sigma = (zip, r, s)
         else:
-            gens = [list(K.xy()[0]) for K in self._getGens(self.pk.E_A, zip)]
-            sigma = (gens, list(E_1.a2()), seeds_hash, [])
+            gens, _ = self._getGens(self.pk.E_A, zip)
+            gens = [list(K.xy()[0]) for K in gens]
+            sigma = (gens, list(E_1.a2()), 0, [])
         return sigma
     
     def verify(self, msg, sigma, pk):
@@ -186,10 +191,18 @@ class SQIsign:
             return self.verify_uncompressed(msg, sigma, pk)
         elif len(sigma) == 5: #seeded
             zip, r, s, seeds, seeds_ls = sigma
+        elif len(sigma) == 6:
+            return self.verify_sparallel(msg, sigma)
+        elif len(sigma) == 7: #uncompressed_parallel
+            return self.verify_uparallel(msg, sigma)
         else:
             assert False, "Somethings wrong with the signature"
-        E_2 = self.decompress_response(zip, pk.E_A, seeds = seeds)
-        return self.decompress_and_check_chall(E_2, s, r, msg, seeds = seeds_ls)
+        A = pk.E_A.a2()
+        delta = A**2 - 4
+        sdelta = sqrtNonConstTime(delta)
+        alpha = (-A-sdelta)/2
+        E_2, alpha = self.decompress_response_new(zip, pk.E_A, alpha)
+        return self.decompress_and_check_chall_new(E_2, alpha, s, r, msg, seeds = seeds_ls)
     
     def decompress_response(self, s, E, seeds = None):
         if seeds:
@@ -202,16 +215,48 @@ class SQIsign:
             P = Q
             Q = temp
         for i, si in enumerate(scalars):
-            G = P + si*Q
+            PmQ = point_difference_new(P, Q)
+            Gx = xDBLMUL(si, 1, xPoint(P[0], E), xPoint(Q[0], E), xPoint(PmQ, E))
+            Gx = self.F(Gx.X)
+            G = E.lift_x(Gx)
+
             phi_i = customTwoIsogeny(G, self.f)
+
             if i < len(scalars) - 1:
                 if seeds:
                     P, Q = TorsionBasis(phi_i.codomain(), 2**self.f, seeds = self._unpack_seeds(seeds[i+1]))
                 else:
-                    Q = phi_i(Q)
-                    P = CompleteBasis(Q, 2**self.f)
-        return phi_i.codomain()
-    
+                    P = phi_i(P)
+                    Q = CompleteBasis(P, 2**self.f)
+            E = phi_i.codomain()
+
+        E, _ = Normalized(phi_i)
+        return E
+
+    def decompress_response_new(self, zip, E, alpha):
+        P, Q = TorsionBasis_2tof(E, alpha, self.f, xOnly=1)
+
+        b, scalars = zip
+        if not b:
+            temp = P
+            P = Q
+            Q = temp
+        for i, si in enumerate(scalars):
+            PmQ = point_difference_new(P, Q)
+            Gx = xDBLMUL(1, si, xPoint(P[0], E), xPoint(Q[0], E), xPoint(PmQ, E))
+            Gx = self.F(Gx.X)
+            Gx_f = E.lift_x(Gx)
+
+            phi_i = customTwoIsogeny(2*Gx_f, self.f-1)
+            P_alpha = phi_i(Gx_f)
+            alpha = P_alpha[0]
+
+            E = phi_i.codomain()
+            if i < len(scalars) - 1:
+                P, Q = TorsionBasis_2tof(E, alpha, self.f, xOnly=1)
+
+        return E, alpha
+
     def decompress_and_check_chall(self, E, s, r, msg, seeds = None):
         if seeds:
             P_2, Q_2 = TorsionBasis(E, self.D_chall, seeds = self._unpack_seeds(seeds[0]))
@@ -220,7 +265,7 @@ class SQIsign:
         if len(s) == 2:
             b_1, s_1 = s
             f2 = Integer(self.D_chall).valuation(2)
-            if b_1:
+            if not b_1:
                 Q_22 = P_2
                 P_22 = Q_2
             else:
@@ -231,14 +276,14 @@ class SQIsign:
             b_1, s_1, b_2, s_2 = s
             f2 = Integer(self.D_chall).valuation(2)
             f3 = Integer(self.D_chall).valuation(3)
-            if b_1:
+            if not b_1:
                 Q_22 = P_2*3**f3
                 P_22 = Q_2*3**f3
             else:
                 P_22 = P_2*3**f3
                 Q_22 = Q_2*3**f3
             K_22 = P_22 + s_1*Q_22
-            if b_2:
+            if not b_2:
                 Q_23 = P_2*2**f2
                 P_23 = Q_2*2**f2
             else:
@@ -257,69 +302,418 @@ class SQIsign:
             hash_seeds = None
         K_chall = hashToPoint(self.D_chall, msg, E_1, seeds = hash_seeds)
         return K_chall.xy()[0] == (r*Q).xy()[0]
-    
+
+    def decompress_and_check_chall_new(self, E, alpha, s, r, msg, seeds = None):
+        P_2, Q_2 = TorsionBasis_2tof(E, alpha, self.f, xOnly = 1)
+
+        P_2 = (2**self.f // self.D_chall)*P_2
+        Q_2 = (2**self.f // self.D_chall)*Q_2
+        K_2 = P_2 + s*Q_2
+
+        phi_chall_hat = E.isogeny(K_2, algorithm='factored')
+        E_1, phi_chall_hat = Normalized(phi_chall_hat)
+        Q = phi_chall_hat(Q_2)
+
+        K_chall = hashToPointNewFast(E_1, msg)
+
+        return K_chall.xy()[0] == (r*Q).xy()[0]
+
     def verify_uncompressed(self, msg, sigma, pk):
-        gens, E_1coeff, hash_seeds, _ = sigma
+        gens, E_1coeff, _, _ = sigma
         E_1 = EllipticCurve(self.F, [0, E_1coeff, 0, 1, 0])
         gens = [self.F(x) for x in gens]
         E_i = pk.E_A
         for xK in gens:
             K = E_i.lift_x(xK)
-            phi_i = customTwoIsogeny(K, self.f)
+            phi_i = customTwoIsogeny(K, self.f-1)
             E_i = phi_i.codomain()
+
         E_2 = E_i
-        K_chall = hashToPoint(self.D_chall, msg, E_1, seeds = self._unpack_seeds(hash_seeds))
+
+        K_chall = hashToPointNewFast(E_1, msg)
         phi_chall = E_1.isogeny(K_chall, algorithm='factored')
         E_2m = phi_chall.codomain()
         return E_2m.j_invariant() == E_2.j_invariant()
+
+    def verify_sparallel(self, msg, sigma):
+        b, zip_chain, r, s, alpha2, alpha_chal = sigma
+
+        E = self.pk.E_A
+        A = E.a2()
+        delta = A**2 - 4
+        sdelta = sqrtNonConstTime(delta)
+        alpha = (-A-sdelta)/2
+        P, Q = TorsionBasis_2tof(E, alpha, self.f, xOnly=1)
+        if not b:
+            temp = P
+            P = Q
+            Q = temp
+
+        alphas = [alpha]
+        Es = [E]
+        Ps = [P]
+        Qs = [Q]
+        for alpha in [alpha2, alpha_chal]:
+            A = -alpha-1/alpha
+            E = EllipticCurve(self.F, [0,A,0,1,0])
+            P, Q = TorsionBasis_2tof(E, alpha, self.f, xOnly=1)
+            alphas = alphas + [alpha, alpha]
+            Es = Es + [E,E]
+            Ps = Ps + [P, P]
+            Qs = Qs + [Q, Q]
+
+        zip_chain.append(s)
+        jinvs = []
+        for i, alpha in enumerate(alphas):
+            E = Es[i]
+            P = Ps[i]
+            Q = Qs[i]
+            PmQ = point_difference_new(P, Q)
+            k = zip_chain[i]
+            Gx = xDBLMUL(1, k, xPoint(P[0], E), xPoint(Q[0], E), xPoint(PmQ, E))
+            Gx = self.F(Gx.X)
+            G_f = E.lift_x(Gx)
+
+            if i < len(alphas)-1:
+                dK = self.f-1
+            else:
+                dK = self.D_chall.valuation(2)
+
+            K = 2**(self.f-dK)*G_f
+            phi = customTwoIsogeny(K, dK)
+            E = phi.codomain()
+            jinvs.append(E.j_invariant())
+
+            if i == len(alphas)-1:
+                Q = 2**(self.f-dK)*Q
+                E = phi(Q).curve()
+
+        ret = True
+        if jinvs[0] != jinvs[1]: ret = False
+        if jinvs[2] != jinvs[3]: ret = False
+
+        Ecom, phi_chall_hat = Normalized(phi)
+        Q = phi_chall_hat(Q)
+        Kchal = hashToPointNewFast(Ecom, msg)
+
+        if Kchal.xy()[0] != (r*Q).xy()[0]: ret = False
+
+        return ret
+
+    def verify_uparallel(self, msg, sigma):
+        gens = [sigma[i] for i in range(4)]
+        Acom, A1, A3 = [sigma[i] for i in range(4,7)]
+        Ecom = EllipticCurve(self.F, [0, Acom, 0, 1, 0])
+        Kcom = hashToPointNewFast(Ecom, msg)
+        gens.append(Kcom[0])
+        Ain = [A1, A1, A3, A3, Acom]
+        jinv_out = []
+        gens2 = []
+        for i in range(5):
+            E = EllipticCurve(self.F, [0, Ain[i], 0, 1, 0])
+            K = E.lift_x(gens[i])
+            if i < 4:
+                phi = customTwoIsogeny(K, self.f-1)
+            else:
+                phi = customTwoIsogeny(K, self.D_chall.valuation(2))
+            E = phi.codomain()
+            jinv_out.append(E.j_invariant())
+            gens2.append(2**(self.f - 2)*gens[i])
+        ret = True
+        if gens2[1] == gens2[2]: ret = False
+        if gens2[3] == gens2[4]: ret = False
+
+        for i in range(5):
+            if gens2[i][0] == 0: ret = False
+
+        jA = self.pk.E_A.j_invariant()
+        if jA != jinv_out[0]: ret = False
+        if jinv_out[1] != jinv_out[2]: ret = False
+        if jinv_out[3] != jinv_out[4]: ret = False
+
+        return ret
 
     def _getGens(self, E_A, zip):
         r"""
         Recomputes the isogeny generators for the uncompressed version.
         Can of course also be done directly
         """
+
         gens = []
-        E_i = E_A
-        P, Q = TorsionBasis(E_i, 2**self.f, xOnly=1)
+        A = E_A.a2()
+        delta = A**2 - 4
+        sdelta = sqrtNonConstTime(delta)
+        alpha = (-A-sdelta)/2
+
+        E = E_A
         b, scalars = zip
-        if b:
+
+        P, Q = TorsionBasis_2tof(E, alpha, self.f, xOnly=1)
+        if not b:
             temp = P
             P = Q
             Q = temp
-        G = P + scalars[0]*Q
-        gens.append(G)
-        phi_i = customTwoIsogeny(G, self.f)
-        Q = phi_i(Q)
-        P = CompleteBasis(Q, 2**self.f)
-        for i, si in enumerate(scalars[1:]):
-            G = P + si*Q
-            E_i = phi_i.codomain()
+        for i, si in enumerate(scalars):
+            PmQ = point_difference_new(P, Q)
+            Gx = xDBLMUL(1, si, xPoint(P[0], E), xPoint(Q[0], E), xPoint(PmQ, E))
+            Gx = self.F(Gx.X)
+            Gx_f = E.lift_x(Gx)
+            G = 2*Gx_f
             gens.append(G)
-            phi_i = customTwoIsogeny(G, self.f)
-            if i < len(scalars) - 2:
-                Q = phi_i(Q)
-                P = CompleteBasis(Q, 2**self.f)
-        return gens
-    
+
+            if i < len(scalars) - 1:
+                phi_i = customTwoIsogeny(G, self.f-1)
+                P_alpha = phi_i(Gx_f)
+                alpha = P_alpha[0]
+                E = phi_i.codomain()
+                P, Q = TorsionBasis_2tof(E, alpha, self.f, xOnly=1)
+
+            phi_i = customTwoIsogeny(G, self.f-1)
+            P_alpha = phi_i(Gx_f)
+            alpha = P_alpha[0]
+
+        return gens, alpha
+
+    def getUncompressed_from_smart(self, zip, s):
+        gens, alpha = self._getGens(self.pk.E_A, zip)
+        G = gens[-1]
+        phi = customTwoIsogeny(G, self.f-1)
+        E_2 = phi.codomain()
+
+        P_2, Q_2 = TorsionBasis_2tof(E_2, alpha, self.f, xOnly = 1)
+
+        P_2 = (2**self.f // self.D_chall)*P_2
+        Q_2 = (2**self.f // self.D_chall)*Q_2
+        K_2 = P_2 + s*Q_2
+
+        phi_chall_hat = E_2.isogeny(K_2, algorithm='factored')
+        E_1, _ = Normalized(phi_chall_hat)
+
+        gens = [list(K.xy()[0]) for K in gens]
+
+        sigma = (gens, list(E_1.a2()), 0, [])
+        return sigma
+
+    def getSmart_from_uncompressed(self, gens_E1, msg):
+        gens = [gens_E1[i] for i in range(len(gens_E1) - 1)]
+        E = self.pk.E_A
+        A = E.a2()
+        delta = A**2 - 4
+        sdelta = sqrtNonConstTime(delta)
+        alpha = (-A-sdelta)/2
+        zip = [1, []]
+        for i in range(len(gens)):
+            Gx = gens[i]
+            G = E.lift_x(Gx)
+            P_2f, Q_2f = TorsionBasis_2tof(E, alpha, self.f, xOnly=1)
+            a_1, a_2 = BiDLP(G, 2*P_2f, 2*Q_2f, 2**(self.f-1))
+            if a_1 % 2 == 0 and i == 0:
+                _temp = P_2f
+                P_2f = Q_2f
+                Q_2f = _temp
+                s = (pow(a_2, -1, 2**(self.f-1))*a_1) % 2**(self.f-1)
+                zip[0] = 0
+            else:
+                s = (pow(a_1, -1, 2**(self.f-1))*a_2) % 2**(self.f-1)
+
+            zip[1].append(s)
+            G_2f = P_2f + s*Q_2f
+            G_2fm1 = 2*G_2f
+            phi = customTwoIsogeny(G_2fm1, self.f-1)
+            E = phi.codomain()
+            P_alpha = phi(G_2f)
+            alpha = P_alpha[0]
+        E_2 = E
+        E_1 = EllipticCurve(self.F, [0, gens_E1[-1], 0, 1, 0])
+        K_chall = hashToPointNewFast(E_1, msg)
+
+        phi_chall = E_1.isogeny(K_chall, algorithm='factored')
+        phi_chall = phi_chall.codomain().isomorphism_to(E_2) * phi_chall
+
+        P = CompleteBasis(K_chall, self.D_chall)
+        Pm = phi_chall(P)
+        P_2, Q_2 = TorsionBasis_2tof(E_2, alpha, self.f, xOnly=1)
+        P_2 = (2**self.f // self.D_chall)*P_2
+        Q_2 = (2**self.f // self.D_chall)*Q_2
+        f2 = self.D_chall.valuation(2)
+        a_0, a_1 = BiDLP(Pm, P_2, Q_2, 2**f2)
+        s = (pow(a_0, -1, 2**f2) * a_1) % 2**f2
+        Qm = Q_2
+        _, phi_chall_hat = Normalized(E_2.isogeny(Pm, algorithm='factored'))
+        Q = phi_chall_hat(Qm)
+        r = Q.discrete_log(K_chall)
+        assert r*Q == K_chall
+        sigma = (zip, r, s)
+
+        return sigma
+
+    def _custom_isom(self, E, S):
+        if (2*S)[0] == 0:
+            return E.isomorphism_to(E)
+        A = E.a2()
+        X = S[0]
+        X0 = (2*S)[0]
+        Ap = (3*X0+A)/(X-X0)
+        EAp = EllipticCurve(self.F, (0,Ap,0,1,0))
+        isom = E.isomorphism_to(EAp)
+        assert(isom(2*S)[0] == 0)
+        return isom
+
+    def getSparallel_from_smart(self, zip, s, msg):
+        E = self.pk.E_A
+        A = E.a2()
+        delta = A**2 - 4
+        sdelta = sqrtNonConstTime(delta)
+        alpha = (-A-sdelta)/2
+        P, Q = TorsionBasis_2tof(E, alpha, self.f, xOnly = 1)
+        swap = zip[0]
+        if not swap:
+            temp = P
+            P = Q
+            Q = temp
+        k = zip[1][0]
+        PmQ = point_difference_new(P, Q)
+        Gx = xDBLMUL(1, k, xPoint(P[0], E), xPoint(Q[0], E), xPoint(PmQ, E))
+        Gx = self.F(Gx.X)
+        G_f = E.lift_x(Gx)
+        phi = customTwoIsogeny(2*G_f, self.f-1)
+        P_alpha = phi(G_f)
+        alpha = P_alpha[0]
+        E = phi.codomain()
+
+        new_alphas = []
+        new_ks = [k]
+
+        zip[1].append(s)
+        for i in range(2):
+            P, Q = TorsionBasis_2tof(E, alpha, self.f, xOnly = 1)
+            k = zip[1][2*i+1]
+            PmQ = point_difference_new(P, Q)
+            Gx = xDBLMUL(1, k, xPoint(P[0], E), xPoint(Q[0], E), xPoint(PmQ, E))
+            Gx = self.F(Gx.X)
+            G_f = E.lift_x(Gx)
+            phi = customTwoIsogeny(2*G_f, self.f-1)
+            Gd = phi(2*Q)
+
+            E = phi.codomain()
+            P_alpha = phi(G_f)
+            alpha = P_alpha[0]
+            P, Q = TorsionBasis_2tof(E, alpha, self.f, xOnly = 1)
+            k = zip[1][2*i+2]
+            PmQ = point_difference_new(P, Q)
+            Gx = xDBLMUL(1, k, xPoint(P[0], E), xPoint(Q[0], E), xPoint(PmQ, E))
+            Gx = self.F(Gx.X)
+            G_f = E.lift_x(Gx)
+
+            if i == 0:
+                dK = self.f-1
+            else:
+                dK = self.D_chall.valuation(2)
+
+            K = 2**(self.f-dK)*G_f
+            phi = customTwoIsogeny(K, dK)
+
+            K4 = 2**(dK-2)*K
+            S = 2**(self.f-3)*Gd + K4
+            isom = self._custom_isom(E, S)
+
+            alpha_mid = isom(2*K4)[0]
+            new_alphas.append(alpha_mid)
+
+            Qchal = isom(Q)
+            E_mid = isom.codomain()
+            P, Q = TorsionBasis_2tof(E_mid, alpha_mid, self.f, xOnly = 1)
+
+            Gd = isom(Gd)
+            a,b = BiDLP(Gd, 2*P, 2*Q, 2**(self.f-1))
+            assert(Gd == a*2*P+b*2*Q)
+            k = (pow(a, -1, 2**(self.f-1)) * b) % 2**(self.f-1)
+            new_ks.append(k)
+
+            K = isom(K)
+            a,b = BiDLP(K, 2**(self.f-dK)*P, 2**(self.f-dK)*Q, 2**dK)
+            assert(K == a*2**(self.f-dK)*P+b*2**(self.f-dK)*Q)
+            k = (pow(a, -1, 2**dK) * b) % 2**dK
+            new_ks.append(k)
+
+            E = phi.codomain()
+            if i == 0:
+                P_alpha = phi(G_f)
+                alpha = P_alpha[0]
+
+            phi = customTwoIsogeny(K, dK)
+
+        Q = 2**(self.f-dK)*Q
+        Ecom, phi_chall_hat = Normalized(phi)
+        Q = phi_chall_hat(Q)
+        Kchal = hashToPointNewFast(Ecom, msg)
+        r = Q.discrete_log(Kchal)
+
+        zip_chain = new_ks[:-1]
+        new_s = new_ks[-1]
+        alpha2 = new_alphas[0]
+        alpha_chal = new_alphas[1]
+        return [swap, zip_chain, r, new_s, alpha2, alpha_chal]
+
+    def getUparallel_from_uncompressed(self, gens_Acom):
+        gens = [gens_Acom[i] for i in range(len(gens_Acom) - 1)]
+        Acom = gens_Acom[-1]
+        new_As = [Acom]
+        E = self.pk.E_A
+        new_gens = []
+        for i in range(2):
+            A = E.a2()
+            delta = A**2 - 4
+            sdelta = sqrtNonConstTime(delta)
+            alpha = (-A-sdelta)/2
+            Gx = gens[2*i]
+            G = E.lift_x(Gx)
+            P_2f, Q_2f = TorsionBasis_2tof(E, alpha, self.f, xOnly=1)
+            P = 2*P_2f
+            Q = 2*Q_2f
+            G2 = 2**(self.f-2)*G
+            P2 = 2**(self.f-2)*P
+            if G2 == P2:
+                R = Q
+            else:
+                R = P
+            phi = customTwoIsogeny(G, self.f-1)
+            Gd = phi(R)
+            Emid = phi.codomain()
+            Kx = gens[2*i+1]
+            K = Emid.lift_x(Kx)
+            psi = customTwoIsogeny(K, self.f-1)
+            E = psi.codomain()
+            S = 2**(self.f-3)*(Gd + K)
+            isom = self._custom_isom(Emid, S)
+            Emid = isom.codomain()
+            new_As.append(Emid.a2())
+            Gd = isom(Gd)
+            new_gens.append(Gd[0])
+            K = isom(K)
+            new_gens.append(K[0])
+
+        return new_gens + new_As
+
     def _derive_Q(self, s, P, Q):
         f2 = self.D_chall.valuation(2)
         f3 = self.D_chall.valuation(3)
         if len(s) == 2: #No 3 part
             b_1, _ = s
-            if b_1 == 0:
+            if b_1 == 1:
                 R = Q
             else:
                 R = P
             return R
         b_1, _, b_2, _ = s
         if b_1 == b_2:
-            if b_1 == 0:
+            if b_1 == 1:
                 R = Q
             else:
                 R = P
         else:
             scalars = [2**f2, 3**f3]
-            R = scalars[b_1]*P + scalars[b_2]*Q
+            R = scalars[b_2]*P + scalars[b_1]*Q
         return R
     
     def _getSeeds(self, E_A, zip):
@@ -418,7 +812,7 @@ class SQIsign_pubkey:
 class SQIsign_privkey:
     """
     Class describing the SQIsign private key,
-    which constists of an alpha describing the
+    which consists of an alpha describing the
     secret ideals, a pushed dictionary of
     torsion bases, a point Q useful in signing,
     and a SQIsign public key
